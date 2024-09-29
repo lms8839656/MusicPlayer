@@ -1,0 +1,22 @@
+#-----------------------------------------------------------
+# Vivado v2018.2 (64-bit)
+# SW Build 2258646 on Thu Jun 14 20:03:12 MDT 2018
+# IP Build 2256618 on Thu Jun 14 22:10:49 MDT 2018
+# Start of session at: Mon May 10 22:04:56 2021
+# Process ID: 4200
+# Current directory: G:/ZLab2021/ZLab2021/lab14OLED
+# Command line: vivado.exe -gui_launcher_event rodinguilauncherevent2688 G:\ZLab2021\ZLab2021\lab14OLED\SPIRxTx.xpr
+# Log file: G:/ZLab2021/ZLab2021/lab14OLED/vivado.log
+# Journal file: G:/ZLab2021/ZLab2021/lab14OLED\vivado.jou
+#-----------------------------------------------------------
+start_gui
+open_project G:/ZLab2021/ZLab2021/lab14OLED/SPIRxTx.xpr
+Scanning sources...
+Finished scanning sources
+INFO: [IP_Flow 19-234] Refreshing IP repositories
+INFO: [IP_Flow 19-1700] Loaded user IP repository 'g:/ZLab2021/ZLab2021/lab14OLED/myip'.
+INFO: [IP_Flow 19-2313] Loaded Vivado IP repository 'D:/Xilinx/Vivado/2018.2/data/ip'.
+open_project: Time (s): cpu = 00:00:18 ; elapsed = 00:00:09 . Memory (MB): peak = 975.055 ; gain = 214.535
+update_compile_order -fileset sources_1
+exit
+INFO: [Common 17-206] Exiting Vivado at Mon May 10 22:07:28 2021...

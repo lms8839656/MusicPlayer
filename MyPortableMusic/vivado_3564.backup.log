@@ -1,0 +1,53 @@
+#-----------------------------------------------------------
+# Vivado v2018.2 (64-bit)
+# SW Build 2258646 on Thu Jun 14 20:03:12 MDT 2018
+# IP Build 2256618 on Thu Jun 14 22:10:49 MDT 2018
+# Start of session at: Mon May 10 22:10:56 2021
+# Process ID: 3564
+# Current directory: G:/ZLab2021/ZLab2021/lab14OLED
+# Command line: vivado.exe -gui_launcher_event rodinguilauncherevent12416 G:\ZLab2021\ZLab2021\lab14OLED\SPIRxTx.xpr
+# Log file: G:/ZLab2021/ZLab2021/lab14OLED/vivado.log
+# Journal file: G:/ZLab2021/ZLab2021/lab14OLED\vivado.jou
+#-----------------------------------------------------------
+start_gui
+open_project G:/ZLab2021/ZLab2021/lab14OLED/SPIRxTx.xpr
+Scanning sources...
+Finished scanning sources
+INFO: [IP_Flow 19-234] Refreshing IP repositories
+INFO: [IP_Flow 19-1700] Loaded user IP repository 'g:/ZLab2021/ZLab2021/lab14OLED/myip'.
+INFO: [IP_Flow 19-2313] Loaded Vivado IP repository 'D:/Xilinx/Vivado/2018.2/data/ip'.
+open_project: Time (s): cpu = 00:00:17 ; elapsed = 00:00:09 . Memory (MB): peak = 979.805 ; gain = 193.992
+update_compile_order -fileset sources_1
+open_bd_design {G:/ZLab2021/ZLab2021/lab14OLED/SPIRxTx.srcs/sources_1/bd/system/system.bd}
+Adding cell -- xilinx.com:ip:processing_system7:5.5 - processing_system7_0
+Adding cell -- xilinx.com:ip:axi_fifo_mm_s:4.1 - axi_fifo_mm_s_0
+Adding cell -- xilinx.com:ip:proc_sys_reset:5.0 - rst_ps7_0_100M
+Adding cell -- xilinx.com:user:mySPIRxTx:1.0 - mySPIRxTx_0
+Adding cell -- xilinx.com:user:myPrescaler:1.0 - myPrescaler_0
+Adding cell -- xilinx.com:ip:axi_dma:7.1 - axi_dma_0
+Adding cell -- xilinx.com:ip:smartconnect:1.0 - axi_smc
+Adding cell -- xilinx.com:user:myI2SSlave:1.0 - myI2SSlave_0
+Adding cell -- xilinx.com:ip:axi_gpio:2.0 - axi_gpio_0
+Adding cell -- xilinx.com:ip:xlconcat:2.1 - xlconcat_0
+Adding cell -- xilinx.com:ip:axi_timer:2.0 - axi_timer_0
+Adding cell -- xilinx.com:user:mySPIRxTx:1.0 - mySPIRxTx_1
+Adding cell -- xilinx.com:ip:axi_fifo_mm_s:4.1 - axi_fifo_mm_s_1
+Adding cell -- xilinx.com:ip:xlconstant:1.1 - xlconstant_0
+Adding cell -- xilinx.com:ip:axi_gpio:2.0 - axi_gpio_1
+Adding cell -- xilinx.com:ip:xlslice:1.0 - xlslice_0
+Adding cell -- xilinx.com:ip:xlslice:1.0 - xlslice_1
+Adding cell -- xilinx.com:ip:xlslice:1.0 - xlslice_2
+Adding cell -- xilinx.com:ip:xlslice:1.0 - xlslice_3
+Adding cell -- xilinx.com:ip:axi_crossbar:2.1 - xbar
+Adding cell -- xilinx.com:ip:axi_protocol_converter:2.1 - auto_pc
+Successfully read diagram <system> from BD file <G:/ZLab2021/ZLab2021/lab14OLED/SPIRxTx.srcs/sources_1/bd/system/system.bd>
+open_bd_design: Time (s): cpu = 00:00:06 ; elapsed = 00:00:06 . Memory (MB): peak = 1100.551 ; gain = 88.508
+set_property location {4 1324 1143} [get_bd_cells xlconstant_0]
+save_bd_design
+Wrote  : <G:/ZLab2021/ZLab2021/lab14OLED/SPIRxTx.srcs/sources_1/bd/system/ui/bd_c954508f.ui> 
+reset_run impl_1 -prev_step 
+launch_runs impl_1 -to_step write_bitstream -jobs 6
+[Mon May 10 22:12:31 2021] Launched impl_1...
+Run output will be captured here: G:/ZLab2021/ZLab2021/lab14OLED/SPIRxTx.runs/impl_1/runme.log
+exit
+INFO: [Common 17-206] Exiting Vivado at Mon May 10 22:18:45 2021...

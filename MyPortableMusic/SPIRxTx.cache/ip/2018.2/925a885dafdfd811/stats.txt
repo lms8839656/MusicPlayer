@@ -1,0 +1,4 @@
+NumberHits:0
+Timestamp: Tue May 04 08:36:23 UTC 2021
+VLNV: xilinx.com:user:myPrescaler:1.0
+SynthRuntime: 33

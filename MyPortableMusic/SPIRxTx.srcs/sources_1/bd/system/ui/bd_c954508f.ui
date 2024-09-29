@@ -1,0 +1,98 @@
+{
+   ExpandedHierarchyInLayout: "",
+   guistr: "# # String gsaved with Nlview 6.8.5  2018-01-30 bk=1.4354 VDI=40 GEI=35 GUI=JA:1.6 non-TLS
+#  -string -flagsOSRD
+preplace port DDR -pg 1 -y 650 -defaultsOSRD
+preplace port lrclk -pg 1 -y 40 -defaultsOSRD
+preplace port miso -pg 1 -y 1180 -defaultsOSRD
+preplace port sws_8bits -pg 1 -y 1210 -defaultsOSRD
+preplace port leds_8bits -pg 1 -y 380 -defaultsOSRD
+preplace port oled_sdin -pg 1 -y 1390 -defaultsOSRD
+preplace port btns_5bits -pg 1 -y 400 -defaultsOSRD
+preplace port mosi -pg 1 -y 1060 -defaultsOSRD
+preplace port sdata -pg 1 -y 240 -defaultsOSRD
+preplace port FIXED_IO -pg 1 -y 670 -defaultsOSRD
+preplace port oled_sclk -pg 1 -y 1370 -defaultsOSRD
+preplace port bclk -pg 1 -y 20 -defaultsOSRD
+preplace port mclk -pg 1 -y 520 -defaultsOSRD
+preplace port ss -pg 1 -y 1080 -defaultsOSRD
+preplace port sclk -pg 1 -y 1040 -defaultsOSRD
+preplace portBus oled_dc -pg 1 -y 1710 -defaultsOSRD
+preplace portBus oled_vdd -pg 1 -y 1810 -defaultsOSRD
+preplace portBus oled_res -pg 1 -y 1610 -defaultsOSRD
+preplace portBus oled_vbat -pg 1 -y 1510 -defaultsOSRD
+preplace inst myPrescaler_0 -pg 1 -lvl 5 -y 520 -defaultsOSRD
+preplace inst xlslice_0 -pg 1 -lvl 5 -y 1510 -defaultsOSRD
+preplace inst axi_dma_0 -pg 1 -lvl 3 -y 910 -defaultsOSRD
+preplace inst xlslice_1 -pg 1 -lvl 5 -y 1610 -defaultsOSRD
+preplace inst xlconstant_0 -pg 1 -lvl 4 -y 1530 -defaultsOSRD
+preplace inst xlslice_2 -pg 1 -lvl 5 -y 1810 -defaultsOSRD
+preplace inst axi_smc -pg 1 -lvl 4 -y 700 -defaultsOSRD
+preplace inst xlslice_3 -pg 1 -lvl 5 -y 1710 -defaultsOSRD
+preplace inst axi_timer_0 -pg 1 -lvl 3 -y 700 -defaultsOSRD
+preplace inst xlconcat_0 -pg 1 -lvl 4 -y 120 -defaultsOSRD
+preplace inst axi_gpio_0 -pg 1 -lvl 5 -y 400 -defaultsOSRD
+preplace inst axi_gpio_1 -pg 1 -lvl 3 -y 1070 -defaultsOSRD
+preplace inst axi_gpio_2 -pg 1 -lvl 5 -y 1210 -defaultsOSRD
+preplace inst myI2SSlave_0 -pg 1 -lvl 5 -y 240 -defaultsOSRD
+preplace inst ps7_0_axi_periph -pg 1 -lvl 2 -y 910 -defaultsOSRD
+preplace inst mySPIRxTx_0 -pg 1 -lvl 5 -y 1050 -defaultsOSRD
+preplace inst mySPIRxTx_1 -pg 1 -lvl 5 -y 1380 -defaultsOSRD
+preplace inst rst_ps7_0_100M -pg 1 -lvl 1 -y 1080 -defaultsOSRD
+preplace inst axi_fifo_mm_s_0 -pg 1 -lvl 4 -y 860 -defaultsOSRD
+preplace inst axi_fifo_mm_s_1 -pg 1 -lvl 4 -y 1380 -defaultsOSRD
+preplace inst processing_system7_0 -pg 1 -lvl 5 -y 730 -defaultsOSRD
+preplace netloc processing_system7_0_DDR 1 5 1 NJ
+preplace netloc axi_fifo_mm_s_1_AXI_STR_TXD 1 4 1 N
+preplace netloc ps7_0_axi_periph_M02_AXI 1 2 3 720 380 NJ 380 NJ
+preplace netloc mySPIRxTx_1_sclk 1 5 1 NJ
+preplace netloc lrclk_0_1 1 0 5 NJ 40 NJ 40 NJ 40 NJ 40 1600J
+preplace netloc xlslice_3_Dout 1 5 1 NJ
+preplace netloc xlslice_1_Dout 1 5 1 NJ
+preplace netloc myI2SSlave_0_sdata 1 5 1 NJ
+preplace netloc bclk_0_1 1 0 5 NJ 20 NJ 20 NJ 20 NJ 20 1610J
+preplace netloc miso_1 1 0 5 10J 970 380J 1150 NJ 1150 1210J 1040 NJ
+preplace netloc processing_system7_0_M_AXI_GP0 1 1 5 420 560 NJ 560 NJ 560 1580J 580 2050
+preplace netloc mySPIRxTx_1_mosi 1 5 1 NJ
+preplace netloc mySPIRxTx_0_sclk 1 5 1 NJ
+preplace netloc rst_ps7_0_100M_peripheral_aresetn 1 1 4 390 660 740 570 1190 570 1610
+preplace netloc axi_smc_M00_AXI 1 4 1 N
+preplace netloc processing_system7_0_FCLK_RESET0_N 1 0 6 30 980 370J 1160 NJ 1160 1200J 960 NJ 960 2040
+preplace netloc ps7_0_axi_periph_M03_AXI 1 2 1 760
+preplace netloc axi_dma_0_M_AXI_SG 1 3 1 1140
+preplace netloc mySPIRxTx_0_mosi 1 5 1 NJ
+preplace netloc mySPIRxTx_1_M00_AXIS 1 3 3 1210 1290 NJ 1290 2030
+preplace netloc ps7_0_axi_periph_M01_AXI 1 2 1 N
+preplace netloc axi_fifo_mm_s_0_AXI_STR_TXD 1 4 1 1550
+preplace netloc axi_gpio_1_gpio_io_o 1 3 2 NJ 1080 1550
+preplace netloc axi_dma_0_M_AXI_MM2S 1 3 1 1120
+preplace netloc xlconstant_0_dout 1 4 1 1560J
+preplace netloc xlconcat_0_dout 1 4 1 1590
+preplace netloc mySPIRxTx_0_ss 1 5 1 NJ
+preplace netloc ps7_0_axi_periph_M06_AXI 1 2 3 720 1190 NJ 1190 NJ
+preplace netloc axi_gpio_0_GPIO2 1 5 1 NJ
+preplace netloc processing_system7_0_FIXED_IO 1 5 1 NJ
+preplace netloc xlslice_2_Dout 1 5 1 NJ
+preplace netloc axi_dma_0_mm2s_introut 1 3 1 1130
+preplace netloc myPrescaler_0_prescale 1 5 1 NJ
+preplace netloc axi_gpio_0_GPIO 1 5 1 NJ
+preplace netloc axi_gpio_0_ip2intc_irpt 1 3 3 1190 200 1550J 140 2050
+preplace netloc axi_gpio_2_GPIO 1 5 1 NJ
+preplace netloc ps7_0_axi_periph_M05_AXI 1 2 1 730
+preplace netloc ps7_0_axi_periph_M04_AXI 1 2 2 750 590 1170J
+preplace netloc processing_system7_0_FCLK_CLK0 1 0 6 20 960 410 670 770 580 1180 580 1570 870 2050
+preplace netloc axi_dma_0_M_AXIS_MM2S 1 3 2 1150 210 1570J
+preplace netloc ps7_0_axi_periph_M00_AXI 1 2 2 730 810 1160J
+preplace netloc mySPIRxTx_0_M00_AXIS 1 3 3 1210 950 NJ 950 2030
+preplace netloc xlslice_0_Dout 1 5 1 NJ
+preplace netloc axi_timer_0_interrupt 1 3 1 1110
+preplace netloc rst_ps7_0_100M_interconnect_aresetn 1 1 1 400
+levelinfo -pg 1 -10 200 570 940 1380 1820 2070 -top 0 -bot 1870
+",
+}
+{
+   da_axi4_cnt: "10",
+   da_board_cnt: "6",
+   da_clkrst_cnt: "16",
+   da_ps7_cnt: "1",
+}

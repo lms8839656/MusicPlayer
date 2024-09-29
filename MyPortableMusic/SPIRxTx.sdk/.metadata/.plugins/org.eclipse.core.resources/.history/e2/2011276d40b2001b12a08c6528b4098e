@@ -1,0 +1,1203 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+#include "platform.h"
+#include "xil_printf.h"
+
+#include "xil_types.h"
+#include "xstatus.h"
+#include "xllfifo.h"
+#include "xscugic.h"
+#include "xaxidma.h"
+#include "xuartps_hw.h"
+#include "ff.h"
+#include "diskio.h"
+#include "xgpio.h"
+#include "xtmrctr.h"
+#include "xsdps.h"		/* SD device driver */
+#include "sleep.h"
+#include "oled.h"
+#include "xparameters.h"
+
+
+#define fatalError(msg) throwFatalError(__PRETTY_FUNCTION__,msg)
+
+void throwFatalError(const char *func,const char *msg) {
+	printf("%s() : %s\r\n",func,msg);
+	for(;;);
+}
+
+// This is a global object which holds the status of the currently playing file.
+typedef struct
+{
+	char filename[16];				// Filename
+	u32 blockSize;					// Number of samples which are sent to the DMA controller each time
+	u32 wavStart;					// File pointer to the beginning of the data section
+	u32 wavLength;					// Length of the data section
+	u32 wavCurrent;					// Next position in the file
+	int downSampling;				// Downsampling factor
+	u32 *pingBuffer;				// Pointer to first buffer (the "ping" in ping-pong buffer)
+	u32 *pongBuffer;				// Pointer to second buffer (the "pong" in ping-pong buffer)
+	int pingPong;					// 0 = next write buffer is ping, 1 = next write buffer is pong
+	int percentFinished;			// Song has played x percent
+	u32 percentFinishedUpdated;		// Whenever percentFinished is updated, percentFinishedUpdated is increased
+} playBuffer_t;
+
+// Size of the buffer which holds the DMA Buffer Descriptors (BDs)
+#define DMA_BDUFFERSIZE 4000
+
+typedef struct
+{
+	u32 deviceId;
+	XLlFifo spiFifoController;
+	u8 spiChipAddr;
+	int spiFifoWordsize;
+
+	XScuGic intCtrl;
+	
+	u16 dmaId;
+	XAxiDma dmaAxiController;
+	XAxiDma_Bd dmaBdBuffer[DMA_BDUFFERSIZE] __attribute__((aligned(XAXIDMA_BD_MINIMUM_ALIGNMENT)));
+	int dmaWritten;
+	u16 dmaInterruptId;
+
+	XGpio gpio;
+
+
+
+	u32 gpioDeviceId;
+	u16 gpioInterruptId;
+	u32 keyPadCharacter;
+
+	XTmrCtr timer;
+	u32 timerId;
+	u16 timerInterruptId;
+
+	u32 supportedSamplingRates[2];
+	u32 currentSamplingRate;
+	double attenuation;
+} adau1761_config;
+
+int adau1761_init(adau1761_config *pDevice, u32 deviceId, u16 dmaId, u16 dmaInterruptId, u32 gpioDeviceId, u16 gpioInterruptId, u32 timerId, u16 timerInterruptId);
+int adau1761_initCodec(adau1761_config *pDevice);
+void adau1761_samplingRate(adau1761_config *pDevice, u32 samplingRate);
+
+int adau1761_spiCheckInit(adau1761_config *pDevice);
+void adau1761_spiWrite(adau1761_config *pDevice,u16 addr, u8 wdata);
+u8 adau1761_spiWriteLong(adau1761_config *pDevice,u16 addr, u16 wdata1, u16 wdata2, u16 wdata3);
+u8 adau1761_spiRead(adau1761_config *pDevice,u16 addr);
+u8 adau1761_spiReadLong(adau1761_config *pDevice,u16 addr);
+void adau1761_setAttenuation(adau1761_config *pDevice, double attenuation);
+
+void adau1761_setupInterruptSystem(adau1761_config *pDevice);
+void adau1761_interruptHandler(adau1761_config *pDevice);
+
+int adau1761_dmaSetup(adau1761_config *pDevice);
+void adau1761_dmaFreeProcessedBDs(adau1761_config *pDevice);
+int adau1761_dmaBusy(adau1761_config *pDevice);
+void adau1761_dmaReset(adau1761_config *pDevice);
+
+void adau1761_dmaTransmit(adau1761_config *pDevice, u32 *buffer, size_t buffer_len, int nRepeats, u32 userData);
+void adau1761_dmaTransmitBLOB(adau1761_config *pDevice, u32 *buffer, size_t buffer_len);
+
+void gpio_setLedBar(adau1761_config *pDevice, u32 percentFinished);
+void gpio_interruptHandler(adau1761_config *pDevice);
+
+void timer_interruptHandler(adau1761_config *pDevice, u8 TmrCtrNumber);
+
+int playFromBuffer();
+
+int isKeyPressed();
+int myGetChar();
+
+FATFS FS_instance;
+adau1761_config codec = {0};
+oled_config theOLED = {0};
+playBuffer_t thePlayBuffer = {0};
+
+void myDelayMs(int ms) {
+	usleep(ms*1000);
+}
+
+// Crude way of delaying approximately one x milliseconds
+//void myDelayMs(int ms) {
+//	for(volatile int i=0;i<80000*ms;++i) {}
+//}
+
+void adau1761_samplingRate(adau1761_config *pDevice, u32 samplingRate) {
+	pDevice->currentSamplingRate = samplingRate;
+	adau1761_initCodec(pDevice);
+}
+
+int adau1761_init(adau1761_config *pDevice, u32 deviceId, u16 dmaId, u16 dmaInterruptId, u32 gpioDeviceId, u16 gpioInterruptId, u32 timerId, u16 timerInterruptId) {
+	pDevice->spiChipAddr = 0;
+	pDevice->spiFifoWordsize = 4;
+	pDevice->deviceId = deviceId;
+	pDevice->dmaId = dmaId;
+	pDevice->dmaInterruptId = dmaInterruptId;
+	pDevice->supportedSamplingRates[0]=44100;
+	pDevice->supportedSamplingRates[1]=48000;
+	pDevice->currentSamplingRate = pDevice->supportedSamplingRates[0];
+	pDevice->attenuation = 0;
+	pDevice->gpioDeviceId = gpioDeviceId;
+	pDevice->gpioInterruptId = gpioInterruptId;
+	pDevice->timerInterruptId = timerInterruptId;
+	pDevice->timerId = timerId;
+
+	XLlFifo_Config *pConfig = XLlFfio_LookupConfig(deviceId);
+	int xStatus = XLlFifo_CfgInitialize(&pDevice->spiFifoController,pConfig,pConfig->BaseAddress);
+	if(XST_SUCCESS != xStatus) {
+		fatalError("Could not initialize FIFO");
+	}
+
+	// Check for the Reset value
+	u32 Status = XLlFifo_Status(&pDevice->spiFifoController);
+	XLlFifo_IntClear(&pDevice->spiFifoController,0xffffffff);
+	Status = XLlFifo_Status(&pDevice->spiFifoController);
+	if(Status != 0) {
+		fatalError("Could not reset FIFO");
+	}
+
+	xStatus = adau1761_initCodec(pDevice);
+	if(XST_SUCCESS != xStatus) {
+		fatalError("Failed to initialize codec");
+	}
+
+	xStatus = XAxiDma_CfgInitialize(&pDevice->dmaAxiController,XAxiDma_LookupConfig(dmaId));
+	if(XST_SUCCESS != xStatus) {
+		fatalError("Failed to initialize DMA");
+	}
+
+	if(!XAxiDma_HasSg(&pDevice->dmaAxiController)){
+		fatalError("Device configured as simple mode");
+	}
+
+	xStatus = adau1761_dmaSetup(pDevice);
+	if (xStatus!=0) {
+		fatalError("Failed to set up DMA");
+	}
+
+    xStatus = XGpio_Initialize(&pDevice->gpio,pDevice->gpioDeviceId);
+    if (xStatus!=XST_SUCCESS) {
+    	fatalError("Could not initialize GPIO");
+    }
+    gpio_setLedBar(pDevice,0);
+
+	xStatus = XTmrCtr_Initialize(&pDevice->timer, pDevice->timerId);
+	if (xStatus != XST_SUCCESS) {
+    	fatalError("Could not initialize timer");
+	}
+	XTmrCtr_SetHandler(&pDevice->timer, (XTmrCtr_Handler)timer_interruptHandler, pDevice);
+
+	adau1761_setupInterruptSystem(pDevice);
+
+	XAxiDma_IntrDisable(&pDevice->dmaAxiController, XAXIDMA_IRQ_ALL_MASK, XAXIDMA_DEVICE_TO_DMA);
+	XAxiDma_IntrDisable(&pDevice->dmaAxiController, XAXIDMA_IRQ_ALL_MASK, XAXIDMA_DMA_TO_DEVICE);
+
+	XAxiDma_IntrEnable(&pDevice->dmaAxiController, XAXIDMA_IRQ_ALL_MASK, XAXIDMA_DMA_TO_DEVICE);
+
+	XTmrCtr_SetOptions(&pDevice->timer, 0,	XTC_INT_MODE_OPTION | XTC_AUTO_RELOAD_OPTION);
+	XTmrCtr_SetResetValue(&pDevice->timer, 0, 0xFFE17B80); // 50 Hz
+	XTmrCtr_Start(&pDevice->timer, 0);
+
+	return 0;
+}
+
+int adau1761_initCodec(adau1761_config *pDevice) {
+	// This enables SPI mode
+	adau1761_spiRead(pDevice, 0x4000);
+	adau1761_spiRead(pDevice, 0x4000);
+	adau1761_spiRead(pDevice, 0x4000);
+
+	// CLKSRC=1, INFREQ=11, COREN=0 (Select PLL as clock source, 1024xfs, disable core clock)
+	// The core clock is disabled. So, we can only talk to register 0x4000 and 0x4002.
+	adau1761_spiWrite(pDevice, 0x4000, 0x0E);
+
+	// Calculate the PLL parameters
+	u16 X,R,M,N;
+	switch (pDevice->currentSamplingRate) {
+	case 48000:	X=1, R=4, M=1002, N= 917;	// PLL Setup for fs=48.0kHz
+				break;
+	case 44100:	X=1, R=4, M=2001, N=1032; 	// PLL Setup for fs=44.1kHz
+				break;
+	default:	fatalError("Unsupported sampling rate");
+				break;
+	}
+
+	// Set PLL parameters but clear PLL enable bit
+	adau1761_spiWriteLong(pDevice, 0x4002, M, N, (R<<11) + ((X-1)<<9) + (1<<8) + 0);
+	// Set PLL parameters and now enable PLL
+	adau1761_spiWriteLong(pDevice, 0x4002, M, N, (R<<11) + ((X-1)<<9) + (1<<8) + 1);
+
+	// Wait for the PLL to lock
+	for(int i=0;;++i) {
+		int lock = adau1761_spiReadLong(pDevice, 0x4002) & 0x02;
+		if (lock) {
+			//printf("PLL locked after %d cycles\r\n",i);
+			break;
+		}
+		myDelayMs(1);
+	}
+
+	// CLKSRC=1, INFREQ=11, COREN=1 (enable core clock)
+	u8 d = adau1761_spiRead(pDevice, 0x4000);
+	adau1761_spiWrite(pDevice, 0x4000, d | 0x01);
+
+	// Wait a little. This seems to be really important!
+	myDelayMs(10);
+
+	// LRCLK/LRPOL=falling edge, LRCLK/LRMOD=50%, BCLK/BPOL=falling edge, LRDEL=1
+	// SPSRS=0, LRMOD=0, BPOL=0, LRPOL=0, CHPF=0, MS=1 (master mode)
+	adau1761_spiWrite(pDevice, 0x4015, 0x01);
+
+	// MX3LM=1, MX3RM=0, MX3G1=0, MX3G2=0, MX3AUXG=0, MX5G3=3, MX6G3=0, LOUTVOL=63
+	// MX4LM=0, MX4RM=1, MX4G1=0, MX4G2=0, MX4AUXG=0, MX5G4=0, MX6G4=3, ROUTVOL=63
+
+	// BPF=0, ADTDM=0, DATDM=0, MSBP=0, LRDEL=0
+	adau1761_spiWrite(pDevice, 0x4016, 0x00);
+
+	// DAPAIR=0, DAOSR=0, ADOSR=0, CONVSR=0
+	adau1761_spiWrite(pDevice, 0x4017, 0x00);
+	adau1761_spiWrite(pDevice, 0x40F8, 0x00);
+
+	// MX3RM=0, MX3LM=1, MX3AUXG=0, MX3EN=1
+	adau1761_spiWrite(pDevice, 0x401C, 0x21);
+	// MX3G2=0, MX3G1=0
+	adau1761_spiWrite(pDevice, 0x401D, 0x00);
+	// MX4RM=1, MX4LM=0, MX4AUXG=0, MX4EN=1
+	adau1761_spiWrite(pDevice, 0x401E, 0x41);
+	// MX4G2=0, MX4G1=0
+	adau1761_spiWrite(pDevice, 0x401F, 0x00);
+	// MX5G4=0, MX5G3=10, MX5EN=1
+	adau1761_spiWrite(pDevice, 0x4020, 0x05);
+	// MX6G4=01, MX6G3=0, MX6EN=1
+	adau1761_spiWrite(pDevice, 0x4021, 0x11);
+	// MX7=0, MX7EN=0
+	adau1761_spiWrite(pDevice, 0x4022, 0x00);
+	// LOUTVOL=63, LOUTM=1, LOMODE=0
+	adau1761_spiWrite(pDevice, 0x4025, 0xFE);
+	// ROUTVOL=63, ROUTM=1, ROMODE=0
+	adau1761_spiWrite(pDevice, 0x4026, 0xFE);
+
+	// HPBIAS=0, DACBIAS=0, PBIAS=0, PREN=1, PLEN=1
+	adau1761_spiWrite(pDevice, 0x4029, 0x03);
+	// DACMONO=0, DACPOL=x,DEMPH=0, DACEN=3
+	u8 DACPOL = 1; // Invert
+	adau1761_spiWrite(pDevice, 0x402A, (DACPOL<<5) + 0x03);
+
+	// Attenuate the signal by 0 dB
+	adau1761_setAttenuation(pDevice, pDevice->attenuation);
+
+	// Pull-up/down
+	//adau1761_spiWrite(pDevice, 0x402D, 0x0F);
+
+	// SINRT=1
+	adau1761_spiWrite(pDevice, 0x40F2, 0x01);
+
+	// SLEWPD=1, ALCPD=1, DECPD=1, SOUTPD=1, INTPD=1, SINPD=1, SPPD=1
+	adau1761_spiWrite(pDevice, 0x40F9, 0x7F);
+	// CLK1=1, CLK0=1 (does not work if CLK1=0)
+	adau1761_spiWrite(pDevice, 0x40FA, 0x03);
+
+	int xStatus = adau1761_spiCheckInit(pDevice);
+	if (xStatus!=0) {
+		return xStatus;
+	}
+
+	return 0;
+}
+
+int adau1761_spiCheckInit(adau1761_config *pDevice) {
+	u8 rdata = adau1761_spiRead(pDevice, 0x4000);
+
+	if ( (rdata&0x01)!=0x01) {
+		fatalError("Failed to initialize audio codec ADAU1761");
+	}
+
+	return 0;
+}
+
+void adau1761_spiWrite(adau1761_config *pDevice,u16 addr, u8 wdata) {
+	XLlFifo_TxPutWord(&pDevice->spiFifoController, (pDevice->spiChipAddr<<1) & 0xFF);
+	XLlFifo_TxPutWord(&pDevice->spiFifoController, (addr>>8) & 0xFF );
+	XLlFifo_TxPutWord(&pDevice->spiFifoController, addr & 0xFF );
+	XLlFifo_TxPutWord(&pDevice->spiFifoController, wdata );
+	XLlFifo_iTxSetLen(&pDevice->spiFifoController, 4 * pDevice->spiFifoWordsize);
+	while(XLlFifo_RxOccupancy(&pDevice->spiFifoController)!=4) {}
+	XLlFifo_RxGetWord(&pDevice->spiFifoController);
+	XLlFifo_RxGetWord(&pDevice->spiFifoController);
+	XLlFifo_RxGetWord(&pDevice->spiFifoController);
+	XLlFifo_RxGetWord(&pDevice->spiFifoController);
+}
+
+u8 adau1761_spiWriteLong(adau1761_config *pDevice,u16 addr, u16 wdata1, u16 wdata2, u16 wdata3) {
+	XLlFifo_TxPutWord(&pDevice->spiFifoController, (pDevice->spiChipAddr<<1) & 0xFF);
+	XLlFifo_TxPutWord(&pDevice->spiFifoController, (addr>>8) & 0xFF );
+	XLlFifo_TxPutWord(&pDevice->spiFifoController, addr & 0xFF );
+	XLlFifo_TxPutWord(&pDevice->spiFifoController, (wdata1>>8) & 0xFF );
+	XLlFifo_TxPutWord(&pDevice->spiFifoController, wdata1 & 0xFF );
+	XLlFifo_TxPutWord(&pDevice->spiFifoController, (wdata2>>8) & 0xFF );
+	XLlFifo_TxPutWord(&pDevice->spiFifoController, wdata2 & 0xFF );
+	XLlFifo_TxPutWord(&pDevice->spiFifoController, (wdata3>>8) & 0xFF );
+	XLlFifo_TxPutWord(&pDevice->spiFifoController, wdata3 & 0xFF );
+	XLlFifo_iTxSetLen(&pDevice->spiFifoController, 9 * pDevice->spiFifoWordsize);
+	while(XLlFifo_RxOccupancy(&pDevice->spiFifoController)!=9) {}
+	XLlFifo_RxGetWord(&pDevice->spiFifoController);
+	XLlFifo_RxGetWord(&pDevice->spiFifoController);
+	XLlFifo_RxGetWord(&pDevice->spiFifoController);
+	XLlFifo_RxGetWord(&pDevice->spiFifoController);
+	XLlFifo_RxGetWord(&pDevice->spiFifoController);
+	XLlFifo_RxGetWord(&pDevice->spiFifoController);
+	XLlFifo_RxGetWord(&pDevice->spiFifoController);
+	XLlFifo_RxGetWord(&pDevice->spiFifoController);
+	u32 rdata = XLlFifo_RxGetWord(&pDevice->spiFifoController);
+
+	return (u8)(rdata & 0xFF);
+}
+
+u8 adau1761_spiRead(adau1761_config *pDevice,u16 addr) {
+	XLlFifo_TxPutWord(&pDevice->spiFifoController, ((pDevice->spiChipAddr<<1) |0x01) & 0xFF);
+	XLlFifo_TxPutWord(&pDevice->spiFifoController, (addr>>8) & 0xFF );
+	XLlFifo_TxPutWord(&pDevice->spiFifoController, addr & 0xFF );
+	XLlFifo_TxPutWord(&pDevice->spiFifoController, 0 );
+	XLlFifo_iTxSetLen(&pDevice->spiFifoController, 4 * pDevice->spiFifoWordsize);
+	while(XLlFifo_RxOccupancy(&pDevice->spiFifoController)!=4) {}
+	XLlFifo_RxGetWord(&pDevice->spiFifoController);
+	XLlFifo_RxGetWord(&pDevice->spiFifoController);
+	XLlFifo_RxGetWord(&pDevice->spiFifoController);
+	u32 rdata = XLlFifo_RxGetWord(&pDevice->spiFifoController);
+
+	return (u8)(rdata & 0xFF);
+}
+
+u8 adau1761_spiReadLong(adau1761_config *pDevice,u16 addr) {
+	XLlFifo_TxPutWord(&pDevice->spiFifoController, ((pDevice->spiChipAddr<<1) |0x01) & 0xFF);
+	XLlFifo_TxPutWord(&pDevice->spiFifoController, (addr>>8) & 0xFF );
+	XLlFifo_TxPutWord(&pDevice->spiFifoController, addr & 0xFF );
+	XLlFifo_TxPutWord(&pDevice->spiFifoController, 0 );
+	XLlFifo_TxPutWord(&pDevice->spiFifoController, 0 );
+	XLlFifo_TxPutWord(&pDevice->spiFifoController, 0 );
+	XLlFifo_TxPutWord(&pDevice->spiFifoController, 0 );
+	XLlFifo_TxPutWord(&pDevice->spiFifoController, 0 );
+	XLlFifo_TxPutWord(&pDevice->spiFifoController, 0 );
+	XLlFifo_iTxSetLen(&pDevice->spiFifoController, 9 * pDevice->spiFifoWordsize);
+	while(XLlFifo_RxOccupancy(&pDevice->spiFifoController)!=9) {}
+	XLlFifo_RxGetWord(&pDevice->spiFifoController);
+	XLlFifo_RxGetWord(&pDevice->spiFifoController);
+	XLlFifo_RxGetWord(&pDevice->spiFifoController);
+	XLlFifo_RxGetWord(&pDevice->spiFifoController);
+	XLlFifo_RxGetWord(&pDevice->spiFifoController);
+	XLlFifo_RxGetWord(&pDevice->spiFifoController);
+	XLlFifo_RxGetWord(&pDevice->spiFifoController);
+	XLlFifo_RxGetWord(&pDevice->spiFifoController);
+	u32 rdata = XLlFifo_RxGetWord(&pDevice->spiFifoController);
+
+	return (u8)(rdata & 0xFF);
+}
+
+void adau1761_setAttenuation(adau1761_config *pDevice, double attenuation) {
+	pDevice->attenuation = attenuation;
+	adau1761_spiWrite(pDevice, 0x402B, (u8)(attenuation/0.375));
+	adau1761_spiWrite(pDevice, 0x402C, (u8)(attenuation/0.375));
+}
+
+void adau1761_setupInterruptSystem(adau1761_config *pDevice)
+{
+	// Initialize the interrupt controller driver so that it is ready to use.
+	XScuGic_Config *IntcConfig = XScuGic_LookupConfig(XPAR_SCUGIC_SINGLE_DEVICE_ID);
+	if (NULL == IntcConfig) {
+		fatalError("XScuGic_LookupConfig() failed");
+	}
+
+	int Status = XScuGic_CfgInitialize(&pDevice->intCtrl, IntcConfig,IntcConfig->CpuBaseAddress);
+	if (Status != XST_SUCCESS) {
+		fatalError("XScuGic_CfgInitialize() failed");
+	}
+
+	XScuGic_SetPriorityTriggerType(&pDevice->intCtrl, pDevice->dmaInterruptId, 0xA0, 0x3);
+	// Connect the device driver handler that will be called when an
+	// interrupt for the device occurs, the handler defined above performs
+	// the specific interrupt processing for the device.
+	Status = XScuGic_Connect(&pDevice->intCtrl, pDevice->dmaInterruptId,(Xil_InterruptHandler)adau1761_interruptHandler,pDevice);
+	if (Status != XST_SUCCESS) {
+		fatalError("XScuGic_Connect() failed");
+	}
+	XScuGic_Enable(&pDevice->intCtrl, pDevice->dmaInterruptId);
+
+	XScuGic_SetPriorityTriggerType(&pDevice->intCtrl, pDevice->gpioInterruptId, 0xA0, 0x3);
+	Status = XScuGic_Connect(&pDevice->intCtrl, pDevice->gpioInterruptId,(Xil_InterruptHandler)gpio_interruptHandler,pDevice);
+	if (Status != XST_SUCCESS) {
+		fatalError("XScuGic_Connect() failed");
+	}
+	XScuGic_Enable(&pDevice->intCtrl, pDevice->gpioInterruptId);
+
+	XGpio_InterruptEnable(&pDevice->gpio, XGPIO_IR_MASK);
+	XGpio_InterruptGlobalEnable(&pDevice->gpio);
+
+	XScuGic_SetPriorityTriggerType(&pDevice->intCtrl, pDevice->timerInterruptId, 0xA0, 0x3);
+	Status = XScuGic_Connect(&pDevice->intCtrl, pDevice->timerInterruptId,(Xil_InterruptHandler)XTmrCtr_InterruptHandler,&pDevice->timer);
+	if (Status != XST_SUCCESS) {
+		fatalError("XScuGic_Connect() failed");
+	}
+	XScuGic_Enable(&pDevice->intCtrl, pDevice->timerInterruptId);
+
+
+	// Initialize the exception table.
+	Xil_ExceptionInit();
+
+	// Register the interrupt controller handler with the exception table.
+	Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_INT,(Xil_ExceptionHandler)XScuGic_InterruptHandler,(void *)&pDevice->intCtrl);
+
+	// Enable exceptions.
+	Xil_ExceptionEnable();
+}
+
+void enterCritSect() {
+	Xil_ExceptionDisable();
+}
+
+void exitCritSect() {
+	Xil_ExceptionEnable();
+}
+
+
+void adau1761_interruptHandler(adau1761_config *pDevice) {
+	// Hint: If a BD has been transferred, we will receive an XAXIDMA_IRQ_IOC_MASK interrupt.
+	// After the last BD, we will receive an XAXIDMA_IRQ_DELAY_MASK interrupt
+
+	XAxiDma_BdRing *TxRingPtr = XAxiDma_GetTxRing(&pDevice->dmaAxiController);
+
+	// Read pending interrupts
+	u32 IrqStatus = XAxiDma_BdRingGetIrq(TxRingPtr);
+
+	// Acknowledge pending interrupts
+	XAxiDma_BdRingAckIrq(TxRingPtr, IrqStatus);
+
+	// If error interrupt is asserted, raise error flag, reset the
+	// hardware to recover from the error, and return with no further processing.
+	if ((IrqStatus & XAXIDMA_IRQ_ERROR_MASK)) {
+		XAxiDma_BdRingDumpRegs(TxRingPtr);
+
+		XAxiDma_Reset(&pDevice->dmaAxiController);
+
+		for(int TimeOut = 2000000;TimeOut>0;--TimeOut) {
+			if (XAxiDma_ResetIsDone(&pDevice->dmaAxiController)) {
+				break;
+			}
+		}
+		return;
+	}
+	else if ((IrqStatus & (XAXIDMA_IRQ_DELAY_MASK | XAXIDMA_IRQ_IOC_MASK))) {
+		// Get all processed BDs from hardware
+		XAxiDma_Bd *BdPtr;
+		int BdCount = XAxiDma_BdRingFromHw(TxRingPtr, XAXIDMA_ALL_BDS, &BdPtr);
+
+		XAxiDma_Bd *BdCurPtr = BdPtr;
+		for (int i = 0; i < BdCount; i++) {
+			// Check the status in each BD
+			u32 BdSts = XAxiDma_BdGetSts(BdCurPtr);
+			if ((BdSts & XAXIDMA_BD_STS_ALL_ERR_MASK) || (!(BdSts & XAXIDMA_BD_STS_COMPLETE_MASK))) {
+				fatalError("Transfer Failed");
+			}
+
+			u32 userData = XAxiDma_BdGetId(BdCurPtr);
+			thePlayBuffer.percentFinished = (int)userData;
+			thePlayBuffer.percentFinishedUpdated++;
+			// Write "bar graph" to LED array
+			gpio_setLedBar(pDevice, thePlayBuffer.percentFinished);
+
+			BdCurPtr = (XAxiDma_Bd *)XAxiDma_BdRingNext(TxRingPtr, BdCurPtr);
+		}
+
+		// Free all processed BDs for future transmission
+		int Status = XAxiDma_BdRingFree(TxRingPtr, BdCount, BdPtr);
+		if (Status != XST_SUCCESS) {
+			fatalError("XAxiDma_BdRingFree() Failed");
+		}
+
+		if (IrqStatus & XAXIDMA_IRQ_IOC_MASK) {
+			playFromBuffer();
+		}
+	}
+}
+
+int adau1761_dmaSetup(adau1761_config *pDevice) {
+	XAxiDma_BdRing *TxRingPtr = XAxiDma_GetTxRing(&pDevice->dmaAxiController);
+
+	pDevice->dmaWritten = FALSE;
+
+	// Disable all TX interrupts before TxBD space setup
+	XAxiDma_BdRingIntDisable(TxRingPtr, XAXIDMA_IRQ_ALL_MASK);
+
+	// Setup TxBD space
+	u32 BdCount = XAxiDma_BdRingCntCalc(XAXIDMA_BD_MINIMUM_ALIGNMENT,(u32) sizeof(pDevice->dmaBdBuffer));
+
+	int Status = XAxiDma_BdRingCreate(TxRingPtr, (UINTPTR)&pDevice->dmaBdBuffer[0], (UINTPTR)&pDevice->dmaBdBuffer[0], XAXIDMA_BD_MINIMUM_ALIGNMENT, BdCount);
+	if (Status != XST_SUCCESS) {
+		fatalError("Failed create BD ring");
+	}
+
+	// Like the RxBD space, we create a template and set all BDs to be the
+	// same as the template. The sender has to set up the BDs as needed.
+	XAxiDma_Bd BdTemplate;
+	XAxiDma_BdClear(&BdTemplate);
+	Status = XAxiDma_BdRingClone(TxRingPtr, &BdTemplate);
+	if (Status != XST_SUCCESS) {
+		fatalError("Failed clone BDs");
+	}
+
+	// This is taken from an example. I think it is to reduce the frequency of interrupts in certain
+	// scenarios. Here, I don't think we need it.
+	//
+	// Set the coalescing threshold, so only one transmit interrupt occurs for this example
+	// If you would like to have multiple interrupts to happen, change the COALESCING_COUNT to be a smaller value
+	//#define DELAY_TIMER_COUNT		100
+	//Status = XAxiDma_BdRingSetCoalesce(TxRingPtr, 1,	DELAY_TIMER_COUNT);
+	//if (Status != XST_SUCCESS) {
+	//	fatalError("Failed set coalescing");
+	//}
+
+	// Start the TX channel
+	Status = XAxiDma_BdRingStart(TxRingPtr);
+	//Status = XAxiDma_StartBdRingHw(TxRingPtr);
+	if (Status != XST_SUCCESS) {
+		fatalError("Failed bd start");
+	}
+
+	return 0;
+}
+
+int adau1761_dmaBusy(adau1761_config *pDevice) {
+	if (pDevice->dmaWritten && XAxiDma_Busy(&pDevice->dmaAxiController,XAXIDMA_DMA_TO_DEVICE)!=0) {
+		return TRUE;
+	}
+	else {
+		return FALSE;
+	}
+}
+
+void adau1761_dmaReset(adau1761_config *pDevice) {
+	XAxiDma_Reset(&pDevice->dmaAxiController);
+	for(int TimeOut = 2000000;TimeOut>0;--TimeOut) {
+		if (XAxiDma_ResetIsDone(&pDevice->dmaAxiController)) {
+			break;
+		}
+	}
+}
+
+void adau1761_dmaStop(adau1761_config *pDevice) {
+	// That's a slightly crude way to stop the DMA
+	adau1761_dmaReset(pDevice);
+
+	// Now everything is messed up, we need to reinitialize the DMA controller.
+	int xStatus = adau1761_dmaSetup(pDevice);
+	if (xStatus!=0) {
+		fatalError("adau1761_dmaSetup() failed");
+	}
+
+	// After initializing the DMA, the interrupt is disabled. So let's enable it again.
+	XAxiDma_IntrEnable(&pDevice->dmaAxiController, XAXIDMA_IRQ_ALL_MASK, XAXIDMA_DMA_TO_DEVICE);
+}
+
+void adau1761_dmaFreeProcessedBDs(adau1761_config *pDevice) {
+	XAxiDma_BdRing *TxRingPtr = XAxiDma_GetTxRing(&pDevice->dmaAxiController);
+
+	// Get all processed BDs from hardware
+	XAxiDma_Bd *BdPtr;
+	int BdCount = XAxiDma_BdRingFromHw(TxRingPtr, XAXIDMA_ALL_BDS, &BdPtr);
+
+	// Free all processed BDs for future transmission
+	int Status = XAxiDma_BdRingFree(TxRingPtr, BdCount, BdPtr);
+	if (Status != XST_SUCCESS) {
+		fatalError("Failed to free BDs");
+	}
+}
+
+// These blocks can have a maximum size of "TxRingPtr->MaxTransferLen" (around 8 MBytes)
+void adau1761_dmaTransmit(adau1761_config *pDevice, u32 *buffer, size_t buffer_len, int nRepeats, u32 userData) {
+	XAxiDma_BdRing *TxRingPtr = XAxiDma_GetTxRing(&pDevice->dmaAxiController);
+
+	// Free the processed BDs from previous run.
+	adau1761_dmaFreeProcessedBDs(pDevice);
+
+	// Flush the SrcBuffer before the DMA transfer, in case the Data Cache is enabled
+	Xil_DCacheFlushRange((u32)buffer, buffer_len * sizeof(u32));
+
+	XAxiDma_Bd *BdPtr = NULL;
+	int Status = XAxiDma_BdRingAlloc(TxRingPtr, nRepeats, &BdPtr);
+	if (Status != XST_SUCCESS) {
+		fatalError("Failed bd alloc");
+	}
+
+	XAxiDma_Bd *BdCurPtr = BdPtr;;
+	for(int i=0;i<nRepeats;++i) {
+		Status = XAxiDma_BdSetBufAddr(BdCurPtr, (UINTPTR)buffer);
+		if (Status != XST_SUCCESS) {
+			fatalError("Tx set buffer addr failed");
+		}
+
+		Status = XAxiDma_BdSetLength(BdCurPtr, buffer_len*sizeof(u32),	TxRingPtr->MaxTransferLen);
+		if (Status != XST_SUCCESS) {
+			fatalError("Tx set length failed");
+		}
+
+		u32 CrBits = 0;
+		if (i==0) {
+			CrBits |= XAXIDMA_BD_CTRL_TXSOF_MASK; // First BD
+		}
+		if (i==nRepeats-1) {
+			CrBits |= XAXIDMA_BD_CTRL_TXEOF_MASK; // Last BD
+		}
+		XAxiDma_BdSetCtrl(BdCurPtr, CrBits);
+
+		XAxiDma_BdSetId(BdCurPtr, userData);
+
+		BdCurPtr = (XAxiDma_Bd *)XAxiDma_BdRingNext(TxRingPtr, BdCurPtr);
+	}
+
+	// Give the BD to hardware
+	Status = XAxiDma_BdRingToHw(TxRingPtr, nRepeats, BdPtr);
+	if (Status != XST_SUCCESS) {
+		fatalError("Failed to hw");
+	}
+
+	pDevice->dmaWritten = TRUE;
+}
+
+// This is splitting up a large BLOB into smalle BDs
+void adau1761_dmaTransmitBLOB(adau1761_config *pDevice, u32 *buffer, size_t buffer_len) {
+	XAxiDma_BdRing *TxRingPtr = XAxiDma_GetTxRing(&pDevice->dmaAxiController);
+
+	u32 nSamplesRemain = buffer_len;
+	u32 maxBlockSize = TxRingPtr->MaxTransferLen/4;
+	u32 *pBlock = (u32*) buffer;
+	while(nSamplesRemain>0) {
+		u32 nTransfer = nSamplesRemain>maxBlockSize ? maxBlockSize : nSamplesRemain;
+		u32 userData = (buffer_len-nSamplesRemain)*100/buffer_len;
+		adau1761_dmaTransmit(pDevice, pBlock, nTransfer, 1, userData);
+		nSamplesRemain -= nTransfer;
+		pBlock += nTransfer;
+	}
+}
+
+typedef struct {
+	char riff[4];
+	u32 riffSize;
+	char wave[4];
+} headerWave_t;
+
+typedef struct {
+	char ckId[4];
+	u32 cksize;
+} genericChunk_t;
+
+typedef struct {
+	u16 wFormatTag;
+	u16 nChannels;
+	u32 nSamplesPerSec;
+	u32 nAvgBytesPerSec;
+	u16 nBlockAlign;
+	u16 wBitsPerSample;
+	u16 cbSize;
+	u16 wValidBitsPerSample;
+	u32 dwChannelMask;
+	u8 SubFormat[16];
+} fmtChunk_t;
+
+void stopWavFile() {
+	// If there is already a WAV file playing, stop it
+	if (adau1761_dmaBusy(&codec)) {
+		adau1761_dmaStop(&codec);
+	}
+    // If there was already a WAV file, free the memory
+	thePlayBuffer.wavCurrent = thePlayBuffer.wavStart = thePlayBuffer.wavLength = 0;
+	if (thePlayBuffer.pingBuffer) {
+		free(thePlayBuffer.pingBuffer);
+		thePlayBuffer.pingBuffer = NULL;
+	}
+	if (thePlayBuffer.pongBuffer) {
+		free(thePlayBuffer.pongBuffer);
+		thePlayBuffer.pongBuffer = NULL;
+	}
+
+	// Clear LEDs
+	gpio_setLedBar(&codec, 0);
+}
+
+int playFromBuffer() {
+	if (!thePlayBuffer.pingBuffer) {
+		thePlayBuffer.pingBuffer = malloc(thePlayBuffer.blockSize*sizeof(u32));
+	}
+	if (!thePlayBuffer.pongBuffer) {
+		thePlayBuffer.pongBuffer = malloc(thePlayBuffer.blockSize*sizeof(u32));
+	}
+
+	if (thePlayBuffer.wavCurrent<thePlayBuffer.wavStart+thePlayBuffer.wavLength) {
+		FIL file;
+	    FRESULT res = f_open(&file, thePlayBuffer.filename, FA_READ);
+	    if (res!=0) {
+	    	//fatalError("File not found");
+	    	return -1;
+	    }
+	    f_lseek(&file,thePlayBuffer.wavCurrent);
+
+		u32 *pDest = thePlayBuffer.pingPong==0 ? thePlayBuffer.pingBuffer : thePlayBuffer.pongBuffer;
+	    u32 size = thePlayBuffer.wavStart+thePlayBuffer.wavLength-thePlayBuffer.wavCurrent;
+	    if (size>thePlayBuffer.blockSize*sizeof(u32)) {
+	    	size = thePlayBuffer.blockSize*sizeof(u32);
+	    }
+	    UINT nBytesRead=0;
+	    res = f_read(&file,(void*)pDest,size,&nBytesRead);
+	    f_close(&file);
+		if (res!=0) {
+			//fatalError("Failed to read file");
+	    	return -2;
+		}
+		if (nBytesRead!=size) {
+			//fatalError("Didn't read the complete chunk");
+	    	return -3;
+		}
+
+		u32 userData = (thePlayBuffer.wavCurrent-thePlayBuffer.wavStart)*100/thePlayBuffer.wavLength;
+
+		thePlayBuffer.pingPong = !thePlayBuffer.pingPong;
+		thePlayBuffer.wavCurrent += size;
+
+        // Crude in-place down-sampling: Basically taking every n'th of a sample
+        // Jerobeam Fenderson's WAV files use a sampling rate of 192kHz (https://oscilloscopemusic.com)
+        // Our sampling rate is actually 39.0625, so a 44.1kHz file will play a at 88.5% the speed (and lower in pitch).
+    	if (thePlayBuffer.downSampling>1) {
+    		u32 nNewTotal = size/4/thePlayBuffer.downSampling;
+    		u32 *pSource = (u32*) pDest;
+    		u32 *pInPlace = (u32*) pDest;
+    		for(u32 i=0;i<nNewTotal;++i,pSource+=thePlayBuffer.downSampling,pInPlace++) {
+    			*pInPlace = *pSource;
+    		}
+    		size = nNewTotal*4;
+    	}
+
+		adau1761_dmaTransmit(&codec, pDest, size/sizeof(u32), 1, userData);
+	}
+
+	return 0;
+}
+
+void playWavFile(const char *filename) {
+    headerWave_t headerWave;
+    fmtChunk_t fmtChunk;
+    FIL file;
+    UINT nBytesRead=0;
+
+    // Stop the currently playing file
+    stopWavFile();
+
+    FRESULT res = f_open(&file, filename, FA_READ);
+    if (res!=0) {
+    	fatalError("File not found");
+    }
+
+    // Read the RIFF header and do some basic sanity checks
+    res = f_read(&file,(void*)&headerWave,sizeof(headerWave),&nBytesRead);
+    if (res!=0) {
+    	fatalError("Failed to read file");
+    }
+	if (memcmp(headerWave.riff,"RIFF",4)!=0) {
+		fatalError("Illegal file format. RIFF not found");
+	}
+	if (memcmp(headerWave.wave,"WAVE",4)!=0) {
+		fatalError("Illegal file format. WAVE not found");
+	}
+
+	// Walk through the chunks and interpret them
+	for(;;) {
+		// read chunk header
+		genericChunk_t genericChunk;
+		res = f_read(&file,(void*)&genericChunk,sizeof(genericChunk),&nBytesRead);
+		if (res!=0) {
+			fatalError("Failed to read file");
+		}
+		if (nBytesRead!=sizeof(genericChunk)) {
+			break; // probably EOF
+		}
+
+		// The "fmt " is compulsory and contains information about the sample format
+		if (memcmp(genericChunk.ckId,"fmt ",4)==0) {
+			res = f_read(&file,(void*)&fmtChunk,genericChunk.cksize,&nBytesRead);
+			if (res!=0) {
+				fatalError("Failed to read file");
+			}
+			if (nBytesRead!=genericChunk.cksize) {
+				fatalError("EOF reached");
+			}
+			if (fmtChunk.wFormatTag!=1) {
+				fatalError("Unsupported format");
+			}
+			if (fmtChunk.nChannels!=2) {
+				fatalError("Only stereo files supported");
+			}
+			if (fmtChunk.wBitsPerSample!=16) {
+				fatalError("Only 16 bit per samples supported");
+			}
+		}
+		// the "data" chunk contains the audio samples
+		else if (memcmp(genericChunk.ckId,"data",4)==0) {
+			// Get the current file position
+			DWORD fp = f_tell(&file);
+
+			// Remember file position and size in the global play buffer
+			strcpy(thePlayBuffer.filename, filename);
+			thePlayBuffer.wavStart = fp;
+			thePlayBuffer.wavCurrent = fp;
+			thePlayBuffer.wavLength = genericChunk.cksize;
+			thePlayBuffer.blockSize = 48000; // These number of samples are around a second
+			thePlayBuffer.downSampling = 1;
+			thePlayBuffer.percentFinished = 0;
+			thePlayBuffer.percentFinishedUpdated++;
+
+			// We are not loading the data now, so skip this chunk
+			f_lseek(&file,fp + genericChunk.cksize);
+		}
+		// Unknown chunk: Just skip it
+		else {
+			DWORD fp = f_tell(&file);
+			f_lseek(&file,fp + genericChunk.cksize);
+		}
+	}
+    f_close(&file);
+
+	// If we have data to play
+    if (thePlayBuffer.wavLength>0) {
+        // Work out best base sampling rate
+        int samplingRate= codec.supportedSamplingRates[0];
+        int mod = ((int)fmtChunk.nSamplesPerSec % samplingRate) - ((int)fmtChunk.nSamplesPerSec % samplingRate>samplingRate/2 ? samplingRate : 0);
+        for(int i=1;i<sizeof(codec.supportedSamplingRates)/sizeof(codec.supportedSamplingRates[0]);++i) {
+            int newmod = ((int)fmtChunk.nSamplesPerSec % codec.supportedSamplingRates[i]) - ((int)fmtChunk.nSamplesPerSec % codec.supportedSamplingRates[i]>codec.supportedSamplingRates[i]/2 ? codec.supportedSamplingRates[i] : 0);
+            if (abs(newmod)<abs(mod)) {
+            	mod = newmod, samplingRate = codec.supportedSamplingRates[i];
+            }
+        }
+
+        // Only set sampling rate if it is different to the current sampling rate
+        if (codec.currentSamplingRate!=samplingRate) {
+        	adau1761_samplingRate(&codec,samplingRate);
+        }
+
+        // Remember the down-sampling settings in the global plaz buffer
+        double subSample = (double)fmtChunk.nSamplesPerSec/samplingRate;
+    	if (subSample>1.6) {
+    		thePlayBuffer.downSampling = (int)(subSample+0.5);
+    		thePlayBuffer.blockSize *= thePlayBuffer.downSampling;
+    	}
+
+		// Write two buffers. We get one interrupt when the first buffer has finished. So we can put in the next one
+		// while the second buffer is playing.
+		playFromBuffer();
+		playFromBuffer();
+    }
+}
+
+void gpio_setLedBar(adau1761_config *pDevice, u32 percentFinished) {
+	XGpio_DiscreteWrite(&pDevice->gpio,1, ((1<<(8*(100-percentFinished)/100))-1) ^ 0xFF );
+}
+
+void gpio_interruptHandler(adau1761_config *pDevice) {
+	XGpio_InterruptDisable(&pDevice->gpio, XGPIO_IR_MASK);
+	XGpio_InterruptClear(&pDevice->gpio, XGPIO_IR_MASK);
+
+	XGpio_InterruptEnable(&pDevice->gpio,XGPIO_IR_MASK);
+}
+
+void timer_interruptHandler(adau1761_config *pDevice, u8 TmrCtrNumber) {
+	static u32 keyPadHoldOff = 0;
+
+	if (keyPadHoldOff>0) {
+		--keyPadHoldOff;
+	}
+
+	// pDevice->keyPadCharacter is used as a mini FIFO holding up to 4 characters in a 32-bit word.
+	// Pressing the keypad will put the VT100 codes for the cursor keys into the FIFO.
+	// Those are read by myGetChar() and isKeyPressed().
+	u32 keyPad = XGpio_DiscreteRead(&pDevice->gpio,2);
+	if (keyPad==0 && keyPadHoldOff<8) {
+		keyPadHoldOff=0;
+	}
+
+	if (keyPad!=0 && keyPadHoldOff==0) {
+		if (pDevice->keyPadCharacter==0) { // Poor man's synchronization. If the buffer is filled, the main program can modify it.
+			if ( (keyPad & 0x10)!=0 ) {
+				pDevice->keyPadCharacter = 0x415B;
+			}
+			else if ( (keyPad & 0x02)!=0 ) {
+				pDevice->keyPadCharacter = 0x425B;
+			}
+			else if ( (keyPad & 0x04)!=0 ) {
+				pDevice->keyPadCharacter = 0x445B;
+			}
+			else if ( (keyPad & 0x08)!=0 ) {
+				pDevice->keyPadCharacter = 0x435B;
+			}
+			else if ( (keyPad & 0x01)!=0 ) {
+				pDevice->keyPadCharacter = 13;
+			}
+		}
+		keyPadHoldOff = 10;
+	}
+
+
+
+}
+
+int isKeyPressed() {
+	return XUartPs_IsReceiveData(STDIN_BASEADDRESS)!=0 || codec.keyPadCharacter!=0;
+}
+
+int myGetChar() {
+	if (codec.keyPadCharacter!=0) {
+		int c = (int) (codec.keyPadCharacter & 0xFF);
+		codec.keyPadCharacter >>= 8;
+		return c;
+	}
+	else {
+		return inbyte();
+	}
+}
+
+int isCardPresent() {
+	u32 StatusReg = XSdPs_GetPresentStatusReg(XPAR_XSDPS_0_BASEADDR);
+	if ( (StatusReg & XSDPS_PSR_CARD_INSRT_MASK) != 0U) {
+		return 1;
+	}
+	else {
+		return 0;
+	}
+}
+
+int main()
+{
+
+	XGpio input;
+	int switch_data = 0;
+	XGpio_Initialize(&input, XPAR_AXI_GPIO_2_DEVICE_ID);
+	XGpio_SetDataDirection(&input,1,0xF);
+
+    init_platform();
+
+
+
+
+    //setvbuf(stdin, NULL, _IONBF, 0);
+    print("WAV File Player\n\r");
+
+    print("Initializing OLED Display\r\n");
+    oled_init(&theOLED, XPAR_AXI_FIFO_MM_S_1_DEVICE_ID, XPAR_AXI_GPIO_1_DEVICE_ID);
+
+	print("Initializing ADAU1761\r\n");
+    adau1761_init(&codec,
+    		XPAR_AXI_FIFO_MM_S_0_DEVICE_ID,
+    		XPAR_AXI_DMA_0_DEVICE_ID, XPAR_FABRIC_AXI_DMA_0_MM2S_INTROUT_INTR,
+			XPAR_AXI_GPIO_0_DEVICE_ID, XPAR_FABRIC_AXI_GPIO_0_IP2INTC_IRPT_INTR,
+			XPAR_AXI_TIMER_0_DEVICE_ID,
+			XPAR_FABRIC_AXI_TIMER_0_INTERRUPT_INTR);
+
+	int volume = 50; // Percent
+    adau1761_setAttenuation(&codec,-20*log10(volume/100.0));
+
+    for(;;) {
+        print("Mounting SD Card\n\r");
+		FRESULT result = f_mount(&FS_instance,"0:/", 1);
+		if (result != 0) {
+			print("Couldn't mount SD Card. Press RETURN to try again\r\n");
+			for (int cnt=0;!isKeyPressed();++cnt) {
+				if ( cnt % 100000 == 0 ) {
+					if ( isCardPresent() ) {
+						enterCritSect();
+						codec.keyPadCharacter = 32;
+						exitCritSect();
+					}
+				}
+			}
+			myGetChar();
+			continue;
+		}
+
+		#define maxFiles 32
+		char files[maxFiles][32] = {0};
+		int filesNum = 0;
+
+		// Look for *.wav files and copy file names to files[]
+		DIR dir;
+		enterCritSect();
+		FRESULT res = f_opendir(&dir, "0:/");
+		if (res != FR_OK) {
+			print("Couldn't read root directory. Press RETURN to try again\r\n");
+			myGetChar();
+			continue;
+		}
+		for (;;) {
+			FILINFO fno;
+			res = f_readdir(&dir, &fno);
+			if (res != FR_OK || fno.fname[0] == 0) {
+				break;
+			}
+			if (fno.fattrib & AM_DIR) {                 // It's a directory
+			}
+			else if (strstr(fno.fname,".wav")!=NULL || strstr(fno.fname,".WAV")!=NULL) { // It's a WAV file
+				strcpy(files[filesNum++],fno.fname);
+			}
+			else {										// It's a normal file
+			}
+		}
+		f_closedir(&dir);
+		exitCritSect();
+
+		if (filesNum == 0) {
+			print("No WAV files found. Press RETURN to try again\r\n");
+			myGetChar();
+			continue;
+		}
+
+		// Rudimentary user interface
+		int currentFile = 0;
+		for(;;) {
+			printf("\033[2J\033[H\r\n");
+			for(int i=0;i<filesNum;++i) {
+				printf("%c%s\r\n",i==currentFile ? '*' : ' ',files[i]);
+			}
+			printf("UP    : Previous file       LEFT:  Volume -\r\n");
+			printf("DOWN  : Next file           RIGHT: Volume +\r\n");
+			printf("RETURN: Play\r\n");
+			printf("SPACE : New SD Card\r\n");
+			printf("%d\r\n", switch_data);
+
+			switch(switch_data){
+				case 0b1:
+					printf("one music rotate\r\n");
+					break;
+				case 0b10:
+					printf("whole music rotate\r\n");
+					break;
+				case 0b100:
+					printf("whole Random rotate\r\n");
+					break;
+				default:
+					printf("one music play\r\n");
+					break;
+			}
+
+			u32 lastValue = thePlayBuffer.percentFinishedUpdated--;
+			for (int cnt=0;!isKeyPressed();++cnt) {
+				if ( cnt % 100000 == 0 && lastValue!=thePlayBuffer.percentFinishedUpdated) {
+					lastValue = thePlayBuffer.percentFinishedUpdated;
+					printf("\033[H[ VOL=%d%% fs=%.1fkHz ",volume,codec.currentSamplingRate/1000.0);
+					if (adau1761_dmaBusy(&codec)) {
+						printf("PLAY=% 3d%% ",thePlayBuffer.percentFinished);
+					}
+					else {
+						printf("   IDLE   ");
+
+						switch(switch_data){
+							case 0b1://"one music rotate\r\n");
+								playWavFile(files[currentFile]);
+								break;
+							case 0b10://"whole music rotate\r\n");
+								if(currentFile+1<filesNum)
+									++currentFile;
+								else if(currentFile+1==filesNum) currentFile = 0;
+								playWavFile(files[currentFile]);
+								break;
+							case 0b100://"whole Random rotate\r\n");
+
+								break;
+							default:
+								printf("   IDLE   ");
+								break;
+						}
+
+
+					}
+					printf("]");
+					fflush(stdout);
+				}
+				if ( cnt % 100000 == 0 ) {
+					if ( !isCardPresent() ) {
+						enterCritSect();
+						codec.keyPadCharacter = 32;
+						exitCritSect();
+					}
+				}
+				if ( cnt % 100000 == 0 ) {
+					static int last_volume=-1;
+					static u32 last_currentSamplingRate=0xFFFFFFFF;
+					static int last_currentFile = -1;
+
+					if (cnt==0 || volume!=last_volume || codec.currentSamplingRate!=last_currentSamplingRate
+							|| currentFile!=last_currentFile) {
+						char buffer[16*4+1];
+						//char name[16*4+1];
+						sprintf(buffer,"VOL=%d%% %.1fkHz\n%s\nKoreaTech\nLeeJaeHwa\n",volume,codec.currentSamplingRate/1000.0,
+								currentFile<filesNum ? files[currentFile] : "");
+						oled_print(&theOLED,buffer);
+						/*
+						sprintf(name, "Lee");
+						oled_print(&theOLED,name);
+						*/
+						last_currentSamplingRate = codec.currentSamplingRate;
+						last_volume = volume;
+						last_currentFile = currentFile;
+					}
+				}
+
+
+
+
+
+			}
+
+			// At this position we know that there is a character in the buffer
+			int c = myGetChar();
+
+			if (c==32) {
+				stopWavFile();
+				break;
+			}
+			switch(c) {
+			case 13: 	playWavFile(files[currentFile]);
+						break;
+			case 0x5B:	c = myGetChar();
+						if (c==0x42) {
+							if (currentFile+1<filesNum) {
+								++currentFile;
+							}
+						}
+						else if (c==0x41) {
+							if (currentFile>0) {
+								--currentFile;
+							}
+						}
+						else if (c==0x44) {
+							if (volume>10) {
+								volume-=10;
+								adau1761_setAttenuation(&codec,-20*log10(volume/100.0));
+							}
+						}
+						else if (c==0x43) {
+							if (volume<100) {
+								volume+=10;
+								adau1761_setAttenuation(&codec,-20*log10(volume/100.0));
+							}
+						}
+			}
+		switch_data = XGpio_DiscreteRead(&input, 1);
+		}
+
+		printf("\033[2J\033[H\r\n");
+		//f_mount(NULL,"0:/", 1);
+    }
+
+	adau1761_dmaReset(&codec);
+
+	print("Good bye\n\r");
+
+    cleanup_platform();
+    return 0;
+}

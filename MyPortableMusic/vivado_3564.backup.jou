@@ -1,0 +1,20 @@
+#-----------------------------------------------------------
+# Vivado v2018.2 (64-bit)
+# SW Build 2258646 on Thu Jun 14 20:03:12 MDT 2018
+# IP Build 2256618 on Thu Jun 14 22:10:49 MDT 2018
+# Start of session at: Mon May 10 22:10:56 2021
+# Process ID: 3564
+# Current directory: G:/ZLab2021/ZLab2021/lab14OLED
+# Command line: vivado.exe -gui_launcher_event rodinguilauncherevent12416 G:\ZLab2021\ZLab2021\lab14OLED\SPIRxTx.xpr
+# Log file: G:/ZLab2021/ZLab2021/lab14OLED/vivado.log
+# Journal file: G:/ZLab2021/ZLab2021/lab14OLED\vivado.jou
+#-----------------------------------------------------------
+start_gui
+open_project G:/ZLab2021/ZLab2021/lab14OLED/SPIRxTx.xpr
+update_compile_order -fileset sources_1
+open_bd_design {G:/ZLab2021/ZLab2021/lab14OLED/SPIRxTx.srcs/sources_1/bd/system/system.bd}
+set_property location {4 1324 1143} [get_bd_cells xlconstant_0]
+save_bd_design
+reset_run impl_1 -prev_step 
+launch_runs impl_1 -to_step write_bitstream -jobs 6
+wait_on_run impl_1

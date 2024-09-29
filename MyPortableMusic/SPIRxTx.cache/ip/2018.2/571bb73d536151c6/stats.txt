@@ -1,0 +1,4 @@
+NumberHits:0
+Timestamp: Tue May 04 05:50:51 UTC 2021
+VLNV: xilinx.com:user:myI2SSlave:1.0
+SynthRuntime: 32
